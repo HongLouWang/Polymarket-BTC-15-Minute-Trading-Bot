@@ -9,9 +9,10 @@ from loguru import logger
 import os
 # Import data sources
 import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from data_sources.coinbase.adapter import CoinbaseDataSource
+from data_sources.binance.adapter import BinanceDataSource
 from data_sources.binance.websocket import BinanceWebSocketSource
 from data_sources.news_social.adapter import NewsSocialDataSource
 from data_sources.solana.rpc import SolanaRPCDataSource
@@ -86,6 +87,77 @@ async def test_coinbase():
 
 
 async def test_binance():
+    """Test Binance Global REST API data source."""
+    console.print("\n[cyan]═══ Testing Binance Global REST API (not Binance US) ═══[/cyan]")
+
+    source = BinanceDataSource()
+
+    try:
+        console.print("Connecting to Binance Global...", end="")
+        connected = await source.connect()
+
+        if not connected:
+            console.print(" [red]✗ FAILED[/red]")
+            return False
+
+        console.print(" [green]✓ Connected[/green]")
+
+        console.print("Fetching current BTC price...", end="")
+        price = await source.get_current_price()
+
+        if price:
+            console.print(f" [green]✓ ${price:,.2f}[/green]")
+        else:
+            console.print(" [red]✗ FAILED[/red]")
+            return False
+
+        console.print("Fetching 24h statistics...", end="")
+        stats = await source.get_24h_stats()
+
+        if stats:
+            console.print(f" [green]✓ Quote volume: ${stats['quote_volume']:,.2f}[/green]")
+        else:
+            console.print(" [red]✗ FAILED[/red]")
+
+        console.print("Fetching order book...", end="")
+        book = await source.get_order_book(level=1)
+
+        if book and book["bids"]:
+            best_bid = book["bids"][0]["price"]
+            best_ask = book["asks"][0]["price"]
+            console.print(f" [green]✓ Bid/Ask: ${best_bid:,.2f} / ${best_ask:,.2f}[/green]")
+        else:
+            console.print(" [red]✗ FAILED[/red]")
+
+        console.print("Fetching 1m candles...", end="")
+        candles = await source.get_candles(granularity=60, limit=5)
+
+        if candles:
+            console.print(f" [green]✓ Got {len(candles)} candles[/green]")
+        else:
+            console.print(" [red]✗ FAILED[/red]")
+            return False
+
+        console.print("Fetching recent trades...", end="")
+        trades = await source.get_recent_trades(limit=5)
+
+        if trades:
+            console.print(f" [green]✓ Got {len(trades)} trades[/green]")
+        else:
+            console.print(" [yellow]⚠ No trades[/yellow]")
+
+        console.print("[green]✓ Binance Global REST API - All tests passed![/green]")
+        return True
+
+    except Exception as e:
+        console.print(f"\n[red]Error testing Binance Global REST API: {e}[/red]")
+        return False
+
+    finally:
+        await source.disconnect()
+
+
+async def test_binance_websocket():
     """Test Binance WebSocket data source."""
     console.print("\n[cyan]═══ Testing Binance WebSocket ═══[/cyan]")
     
@@ -274,15 +346,15 @@ def test(
         "all",
         "--source",
         "-s",
-        help="Test specific source: all, coinbase, binance, news, solana"
+        help="Test specific source: all, coinbase, binance, binance_ws, news, solana"
     )
 ):
     """
     Test external data sources.
     
     Example:
-        python scripts/test_data_sources.py test
-        python scripts/test_data_sources.py test --source coinbase
+        python data_sources/test.py
+        python data_sources/test.py --source binance
     """
     async def run_specific_test():
         if source == "all":
@@ -291,6 +363,8 @@ def test(
             return 0 if await test_coinbase() else 1
         elif source == "binance":
             return 0 if await test_binance() else 1
+        elif source == "binance_ws":
+            return 0 if await test_binance_websocket() else 1
         elif source == "news":
             return 0 if await test_news_social() else 1
         elif source == "solana":

@@ -161,8 +161,8 @@ class CustomDataProvider:
             InstrumentId or None
         """
         mapping = {
-            "coinbase": "BTC-USD.COINBASE",
             "binance": "BTCUSDT.BINANCE",
+            "binance_ws": "BTCUSDT.BINANCE",
         }
         
         instrument_id_str = mapping.get(source)

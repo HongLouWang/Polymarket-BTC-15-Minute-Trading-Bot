@@ -35,11 +35,12 @@ A production-grade algorithmic trading bot for **Polymarket's 15-minute BTC pric
 | Feature | Description |
 |---------|-------------|
 | **7-Phase Architecture** | Modular, testable, production-ready design |
-| **Multi-Signal Intelligence** | Spike Detection, Sentiment Analysis, Price Divergence |
-| **Risk-First Design** | $1 max per trade, 30% stop loss, 20% take profit |
-| **Dual-Mode Operation** | Toggle between simulation and live without restart |
+| **Markov Edge Filter** | Trades only when state persistence, market gap, and fee-aware edge pass |
+| **Kelly Position Sizing** | Uses bankroll, min/max bet caps, and Kelly sizing from model probability |
+| **Risk-First Design** | `DRY_RUN=True` in `bot.py` by default, with configurable bankroll and exposure limits |
+| **Dual-Mode Operation** | Redis live toggles are ignored while `DRY_RUN=True` |
 | **Real-Time Monitoring** | Grafana dashboards + Prometheus metrics |
-| **Self-Learning** | Automatically optimizes signal weights based on performance |
+| **Self-Learning** | Records a local trade journal for review and threshold iteration |
 | **Auto-Recovery** | WebSocket auto-reconnection, rate limiting, data validation |
 | **Paper Trading** | Full P&L tracking in simulation mode |
 
@@ -58,15 +59,15 @@ A production-grade algorithmic trading bot for **Polymarket's 15-minute BTC pric
     subgraph Process[PROCESSING]
         I[Ingestion<br/>Unify & Validate]
         N[Nautilus Core<br/>Trading Framework]
-        S[Signal Processors<br/>Spike, Sentiment, Divergence]
+        S[Signal Processors<br/>Markov, Orderbook, Velocity]
         F[Fusion Engine<br/>Weighted Voting]
     end
     
     subgraph Output[OUTPUT]
-        R[Risk Management<br/>$1 Max, Stop Loss]
+        R[Risk Management<br/>Kelly Caps, Dry Run]
         E[Execution<br/>Polymarket Orders]
         M[Monitoring<br/>Grafana Dashboard]
-        L[Learning<br/>Weight Optimization]
+        L[Learning<br/>Trade Journal Review]
     end
     
     D --> I --> N --> S --> F --> R --> E --> M --> L
@@ -123,13 +124,16 @@ REDIS_HOST=localhost
 REDIS_PORT=6379
 REDIS_DB=2
 
-# Trading Parameters
-MAX_POSITION_SIZE=1.0
-STOP_LOSS_PCT=0.30
-TAKE_PROFIT_PCT=0.20
-SPIKE_THRESHOLD=0.15
-DIVERGENCE_THRESHOLD=0.05
+SAFE_ADDRESS=your_polymarket_safe_address
+CLOB_HOST=https://clob.polymarket.com
+
+# Market Selection
+MARKET_INTERVAL_SECONDS=900
+MARKET_SLUG_PREFIX=btc-updown-15m
 ```
+
+Strategy test thresholds such as `DRY_RUN`, `MIN_PROB`, `MIN_EDGE`, bankroll, Kelly scale, and Markov sample requirements are configured directly in `bot.py`.
+
 ## 5. Start Redis
 ```
 bash
@@ -150,13 +154,13 @@ bash
 # Test mode (trades every minute - for quick testing)
 python run_bot.py --test-mode
 
-# Live trading mode (REAL MONEY!)
+# Live trading mode requires DRY_RUN=False in bot.py (REAL MONEY!)
 python 15m_bot_runner.py --live
 ```
 ## ⚙️ Configuration Options
 Argument	Description	Default
 --test-mode	Trade every minute for testing	False
---live	Enable live trading (real money)	False
+--live	Enable live trading only when DRY_RUN=False in bot.py	False
 --no-grafana	Disable Grafana metrics	False
 ##View Paper Trades
 ```
@@ -261,8 +265,6 @@ Open a Pull Request
 
 - Implement more signal processors
 
-- Add Telegram/Discord alerts
-
 - Create web UI for management
 
 
@@ -273,7 +275,7 @@ Open a Pull Request
 ## ❓ FAQ
 
 **Q: How much money do I need to start?**  
-**A:** The bot caps each trade at $1, so you can start with as little as $10–20.
+**A:** The default bankroll is $100, with $1 minimum test trades and a configurable Kelly-capped max bet. Keep `DRY_RUN=True` in `bot.py` until the journal shows stable results.
 
 **Q: Is this profitable?**  
 **A:** Yes — in simulation testing it has shown good results (e.g. ~75% win rate in early runs).  
@@ -288,7 +290,7 @@ However, **past performance does not guarantee future results**. Always test tho
 **Q: What's the difference between test mode and normal mode?**  
 **A:**  
 - **Test mode** — trades simulated every minute (great for quick testing and debugging)  
-- **Normal mode** — trades every 15 minutes (matches the intended 15-minute strategy timeframe)
+- **Normal mode** — evaluates Markov edge during each configured Up/Down market and trades only when probability, edge, and risk gates pass
 
  
 ## Disclaimer
@@ -322,7 +324,3 @@ Twitter: @Kator07
 
 ## ⭐ Show Your Support
 If you find this project useful, please star the GitHub repo! It helps others discover it.
-
-## contact me on telegram 
- [![Telegram](https://img.shields.io/badge/Telegram-%230088cc.svg?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/Bigg_O7)
-

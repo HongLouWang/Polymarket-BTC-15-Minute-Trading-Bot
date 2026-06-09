@@ -239,7 +239,8 @@ async def test_polymarket_client():
         balance = await client.get_balance()
         
         if balance:
-            console.print(f" [green]✓ USDC: ${balance['USDC']:,.2f}[/green]")
+            collateral = balance.get("collateral", balance.get("USDC", 0))
+            console.print(f" [green]✓ Collateral: ${collateral:,.2f}[/green]")
         
         await client.disconnect()
         

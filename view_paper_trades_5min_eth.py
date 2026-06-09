@@ -6,8 +6,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-PAPER_TRADES_JSONL = Path("paper_trades.jsonl")
-LEGACY_PAPER_TRADES_JSON = Path("paper_trades.json")
+PAPER_TRADES_JSONL = Path("paper_trades_eth_5min.jsonl")
+LEGACY_PAPER_TRADES_JSON = Path("paper_trades_eth_5min.json")
 TABLE_WIDTH = 124
 
 

@@ -1,10 +1,10 @@
 """
 Deribit Put/Call Ratio Signal Processor
-Fetches real-time BTC options data from Deribit (free public API)
+Fetches real-time crypto options data from Deribit (free public API)
 and uses the put/call ratio as a proxy for institutional sentiment.
 
 WHY THIS WORKS:
-  Professional traders hedge and speculate using BTC options on Deribit —
+  Professional traders hedge and speculate using crypto options on Deribit —
   the world's largest crypto options exchange ($15B+ daily volume).
 
   Put/Call Ratio (PCR) = open_interest_puts / open_interest_calls
@@ -25,9 +25,9 @@ WHY THIS WORKS:
 
 API USED (completely free, no auth required):
   GET https://www.deribit.com/api/v2/public/get_book_summary_by_currency
-    ?currency=BTC&kind=option
+    ?currency={BTC|ETH}&kind=option
 
-  Returns all active BTC option contracts with:
+  Returns all active option contracts for the selected currency with:
     - open_interest
     - instrument_name (e.g. BTC-20FEB26-95000-P = Put, -C = Call)
     - days to expiry (parsed from instrument name)
@@ -55,7 +55,7 @@ DERIBIT_URL = "https://www.deribit.com/api/v2/public/get_book_summary_by_currenc
 
 class DeribitPCRProcessor(BaseSignalProcessor):
     """
-    Uses Deribit BTC options put/call ratio for contrarian signals.
+    Uses Deribit options put/call ratio for contrarian signals.
 
     Cached for 5 minutes — options data doesn't change tick-by-tick
     and we don't want to hammer Deribit's API every 15 minutes.
@@ -63,15 +63,17 @@ class DeribitPCRProcessor(BaseSignalProcessor):
 
     def __init__(
         self,
+        currency: str = "BTC",
         bullish_pcr_threshold: float = 1.20,   # PCR above this = contrarian bullish
         bearish_pcr_threshold: float = 0.70,   # PCR below this = contrarian bearish
         max_days_to_expiry: int = 2,            # only short-dated options
-        min_open_interest: float = 100.0,       # ignore tiny strikes (BTC notional)
+        min_open_interest: float = 100.0,       # ignore tiny strikes
         cache_seconds: int = 300,               # refresh every 5 minutes
         min_confidence: float = 0.55,
     ):
         super().__init__("DeribitPCR")
 
+        self.currency = currency.upper()
         self.bullish_pcr_threshold = bullish_pcr_threshold
         self.bearish_pcr_threshold = bearish_pcr_threshold
         self.max_days_to_expiry = max_days_to_expiry
@@ -85,6 +87,7 @@ class DeribitPCRProcessor(BaseSignalProcessor):
 
         logger.info(
             f"Initialized Deribit PCR Processor: "
+            f"currency={self.currency}, "
             f"bullish_pcr>{bullish_pcr_threshold}, "
             f"bearish_pcr<{bearish_pcr_threshold}, "
             f"max_dte={max_days_to_expiry}d"
@@ -97,7 +100,7 @@ class DeribitPCRProcessor(BaseSignalProcessor):
     def _parse_dte(self, instrument_name: str) -> Optional[int]:
         """
         Parse days to expiry from Deribit instrument name.
-        Format: BTC-20FEB26-95000-P  (BTC-DDMMMYY-STRIKE-TYPE)
+        Format: BTC-20FEB26-95000-P  (CURRENCY-DDMMMYY-STRIKE-TYPE)
         """
         try:
             parts = instrument_name.split("-")
@@ -117,7 +120,7 @@ class DeribitPCRProcessor(BaseSignalProcessor):
             with self._get_client() as client:
                 resp = client.get(
                     DERIBIT_URL,
-                    params={"currency": "BTC", "kind": "option"},
+                    params={"currency": self.currency, "kind": "option"},
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -177,7 +180,7 @@ class DeribitPCRProcessor(BaseSignalProcessor):
             }
 
             logger.info(
-                f"Deribit: overall_PCR={overall_pcr:.3f}, "
+                f"Deribit {self.currency}: overall_PCR={overall_pcr:.3f}, "
                 f"short_PCR={short_pcr:.3f} "
                 f"(puts={short_put_oi:.0f} vs calls={short_call_oi:.0f} short-dated)"
             )

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import math
 from decimal import Decimal
 import time
+import threading
 from dataclasses import dataclass
 from typing import Any, List, Optional, Dict
 import random
@@ -90,12 +91,11 @@ else:
 # =============================================================================
 QUOTE_STABILITY_REQUIRED = 3      # Need only 3 valid ticks to be stable (faster startup)
 QUOTE_MIN_SPREAD = 0.001          # Both bid AND ask must be at least this
-MARKET_INTERVAL_SECONDS = int(os.getenv("MARKET_INTERVAL_SECONDS", "900"))
-MARKET_SLUG_PREFIX = os.getenv("MARKET_SLUG_PREFIX", "btc-updown-15m").lower()
-PAPER_TRADES_PATH = os.getenv("PAPER_TRADES_PATH", "paper_trades.json")
-PAPER_SETTLEMENT_DELAY_SECONDS = int(os.getenv("PAPER_SETTLEMENT_DELAY_SECONDS", "20"))
-PAPER_SETTLEMENT_CHECK_SECONDS = int(os.getenv("PAPER_SETTLEMENT_CHECK_SECONDS", "10"))
-GAMMA_API_BASE_URL = os.getenv("GAMMA_API_BASE_URL", "https://gamma-api.polymarket.com")
+MARKET_INTERVAL_SECONDS = int(os.getenv("MARKET_5M_INTERVAL_SECONDS", "300"))
+MARKET_SLUG_PREFIX = os.getenv("MARKET_5M_SLUG_PREFIX", "btc-updown-5m").lower()
+MARKET_LABEL = "5-MIN"
+TRADE_JOURNAL_PATH = os.getenv("TRADE_JOURNAL_5M_PATH", "trade_journal_5min.jsonl")
+PAPER_TRADES_PATH = os.getenv("PAPER_TRADES_5M_PATH", "paper_trades_5min.json")
 SPOT_SYMBOL = os.getenv("BINANCE_SPOT_SYMBOL", "BTCUSDT").upper()
 
 # Local strategy/test configuration. Keep these in code so threshold changes are
@@ -114,10 +114,13 @@ MARKET_CLOSE_BUFFER_SECONDS = 1
 MAX_TRADES_PER_MARKET = 3
 REQUIRE_FUSION_CONFIRMATION = False
 MAX_TOTAL_EXPOSURE = BANKROLL
+PAPER_SETTLEMENT_DELAY_SECONDS = int(os.getenv("PAPER_SETTLEMENT_DELAY_SECONDS", "20"))
+PAPER_SETTLEMENT_CHECK_SECONDS = int(os.getenv("PAPER_SETTLEMENT_CHECK_SECONDS", "10"))
+GAMMA_API_BASE_URL = os.getenv("GAMMA_API_BASE_URL", "https://gamma-api.polymarket.com")
 
 # Lowered Markov sample requirements for dry-run system testing.
-MARKOV_MIN_TRANSITIONS = 45
-MARKOV_MIN_STATE_OBSERVATIONS = 6
+MARKOV_MIN_TRANSITIONS = 100
+MARKOV_MIN_STATE_OBSERVATIONS = 10
 MARKOV_RETURN_THRESHOLD = 0.0001
 MARKOV_STRONG_RETURN_THRESHOLD = 0.0005
 MARKOV_PROBABILITY_RETURN_THRESHOLD = 0.005
@@ -248,7 +251,7 @@ class IntegratedBTCStrategy(Strategy):
         self._market_stable = False
         self._last_instrument_switch = None
         
-        # Markov/Kelly configuration is intentionally local to bot.py for
+        # Markov/Kelly configuration is intentionally local to bot-5min.py for
         # repeatable dry-run testing.
         self.dry_run = DRY_RUN
         self.min_edge = MIN_EDGE
@@ -263,7 +266,7 @@ class IntegratedBTCStrategy(Strategy):
         self.market_close_buffer_seconds = MARKET_CLOSE_BUFFER_SECONDS
         self.max_trades_per_market = MAX_TRADES_PER_MARKET
         self.require_fusion_confirmation = REQUIRE_FUSION_CONFIRMATION
-        self.trade_journal = get_trade_journal(os.getenv("TRADE_JOURNAL_PATH", "trade_journal.jsonl"))
+        self.trade_journal = get_trade_journal(TRADE_JOURNAL_PATH)
 
         self.last_trade_time = -1
         self._last_edge_check_at: Optional[datetime] = None
@@ -482,7 +485,7 @@ class IntegratedBTCStrategy(Strategy):
             threading.Thread(target=self._start_grafana_sync, daemon=True).start()
 
         logger.info("=" * 80)
-        logger.info("Strategy active - will trade every 15 minutes")
+        logger.info(f"Strategy active - will trade every {MARKET_INTERVAL_SECONDS // 60} minutes")
         logger.info(f"Price history: {len(self.price_history)} points")
         if len(self.price_history) >= 20:
             logger.info("✓ READY TO TRADE NOW!")
@@ -590,7 +593,7 @@ class IntegratedBTCStrategy(Strategy):
         btc_instruments.sort(key=lambda x: x['market_timestamp'])
         
         logger.info("=" * 80)
-        logger.info(f"FOUND {len(btc_instruments)} BTC 15-MIN MARKETS:")
+        logger.info(f"FOUND {len(btc_instruments)} BTC {MARKET_LABEL} MARKETS:")
         for i, inst in enumerate(btc_instruments):
             # A market is ACTIVE if it has started AND not yet ended
             is_active = inst['time_diff_minutes'] <= 0 and inst['end_timestamp'] > current_timestamp
@@ -601,7 +604,7 @@ class IntegratedBTCStrategy(Strategy):
         self.all_btc_instruments = btc_instruments
         
         # Find current market and SUBSCRIBE IMMEDIATELY
-        # FIXED: A market is current if it has STARTED and not yet ENDED (use end_time, not a hardcoded 15-min window)
+        # FIXED: A market is current if it has STARTED and not yet ENDED (use end_time, not a hardcoded interval window)
         for i, inst in enumerate(btc_instruments):
             is_active = inst['time_diff_minutes'] <= 0 and inst['end_timestamp'] > current_timestamp
             if is_active:
@@ -1597,7 +1600,7 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
         os.environ.setdefault("POLYMARKET_RELAYER_API_KEY", relayer_api_key)
     
     print("=" * 80)
-    print("INTEGRATED POLYMARKET BTC 15-MIN TRADING BOT")
+    print(f"INTEGRATED POLYMARKET BTC {MARKET_LABEL} TRADING BOT")
     print("Nautilus + Markov Edge + Kelly Sizing")
     print("=" * 80)
 
@@ -1620,6 +1623,8 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
     print(f"  DRY_RUN: {dry_run}")
     print(f"  Redis Control: {'Enabled' if redis_client else 'Disabled'}")
     print(f"  Grafana: {'Enabled' if enable_grafana else 'Disabled'}")
+    print(f"  Market interval: {MARKET_INTERVAL_SECONDS}s")
+    print(f"  Market slug prefix: {MARKET_SLUG_PREFIX}")
     print(f"  Spot data source: Binance Global ({SPOT_SYMBOL})")
     print(f"  Markov: MIN_PROB={MIN_PROB:.2f} MIN_EDGE={MIN_EDGE:.2f}")
     print(f"  Bankroll: ${BANKROLL:.2f}")
@@ -1653,7 +1658,7 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
     }
 
     logger.info("=" * 80)
-    logger.info("LOADING BTC 15-MIN MARKETS BY SLUG")
+    logger.info(f"LOADING BTC {MARKET_LABEL} MARKETS BY SLUG")
     logger.info(f"  Interval start: {unix_interval_start} | Count: {len(btc_slugs)}")
     logger.info(f"  First: {btc_slugs[0]}  Last: {btc_slugs[-1]}")
     logger.info("=" * 80)
@@ -1761,7 +1766,7 @@ def main():
 
     if DRY_RUN:
         if args.live:
-            logger.warning("DRY_RUN=True in bot.py; --live will still run in simulation mode.")
+            logger.warning("DRY_RUN=True in bot-5min.py; --live will still run in simulation mode.")
         simulation = True
 
     if not simulation:

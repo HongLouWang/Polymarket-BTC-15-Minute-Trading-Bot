@@ -2,6 +2,7 @@
 Risk Engine
 Manages position sizing, risk limits, and portfolio constraints
 """
+import os
 from decimal import Decimal
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -65,15 +66,22 @@ class RiskEngine:
         Args:
             limits: Risk limits configuration
         """
-        # Default conservative limits with $1 max per trade
+        bankroll = Decimal(os.getenv("BANKROLL", "100.0"))
+        max_bet = Decimal(os.getenv("MAX_BET", "50.0"))
+        min_bet = Decimal(os.getenv("MIN_BET", "1.0"))
+        max_total_exposure = Decimal(os.getenv("MAX_TOTAL_EXPOSURE", str(bankroll)))
+
+        # Default limits follow the Markov/Kelly setup from the article:
+        # dry-run first, $1 minimum test orders, and a configurable max bet.
         self.limits = limits or RiskLimits(
-            max_position_size=Decimal("1.0"),  # $1 max per position
-            max_total_exposure=Decimal("10.0"),  # $10 total
+            max_position_size=max_bet,
+            max_total_exposure=max_total_exposure,
             max_positions=5,
             max_drawdown_pct=0.15,  # 15% max drawdown
             max_loss_per_day=Decimal("5.0"),  # $5 daily loss limit
             max_leverage=1.0,
         )
+        self.min_position_size = min_bet
         
         # Track positions
         self._positions: Dict[str, PositionRisk] = {}
@@ -81,8 +89,8 @@ class RiskEngine:
         # Track daily statistics
         self._daily_pnl = Decimal("0")
         self._daily_trades = 0
-        self._peak_balance = Decimal("1000.0")  # Starting balance
-        self._current_balance = Decimal("1000.0")
+        self._peak_balance = bankroll
+        self._current_balance = bankroll
         
         # Alerts
         self._alerts: List[Dict[str, Any]] = []
@@ -166,13 +174,14 @@ class RiskEngine:
         # Calculate position size
         position_size = risk_amount * strength_multiplier
         
-        # ENFORCE $1 MAXIMUM
-        if position_size > Decimal("1.0"):
-            logger.info(f"Capping position size from ${float(position_size):.2f} to $1.00")
-            position_size = Decimal("1.0")
+        if position_size > self.limits.max_position_size:
+            logger.info(
+                f"Capping position size from ${float(position_size):.2f} "
+                f"to ${float(self.limits.max_position_size):.2f}"
+            )
+            position_size = self.limits.max_position_size
         
-        # Ensure at least $1 (for simulation, in live you might want higher minimum)
-        position_size = max(position_size, Decimal("1.0"))
+        position_size = max(position_size, self.min_position_size)
         
         logger.info(
             f"Calculated position size: ${position_size:.2f} "

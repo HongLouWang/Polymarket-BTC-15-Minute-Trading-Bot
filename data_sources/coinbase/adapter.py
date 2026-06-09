@@ -94,7 +94,7 @@ class CoinbaseDataSource:
             self._last_price = price
             self._last_update = datetime.now()
             
-            logger.debug(f"Coinbase BTC price: ${price:,.2f}")
+            logger.debug(f"Coinbase {self.product_id} price: ${price:,.2f}")
             return price
             
         except Exception as e:

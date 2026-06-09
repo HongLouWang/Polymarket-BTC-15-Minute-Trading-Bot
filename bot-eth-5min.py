@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import math
 from decimal import Decimal
 import time
+import threading
 from dataclasses import dataclass
 from typing import Any, List, Optional, Dict
 import random
@@ -90,13 +91,14 @@ else:
 # =============================================================================
 QUOTE_STABILITY_REQUIRED = 3      # Need only 3 valid ticks to be stable (faster startup)
 QUOTE_MIN_SPREAD = 0.001          # Both bid AND ask must be at least this
-MARKET_INTERVAL_SECONDS = int(os.getenv("MARKET_INTERVAL_SECONDS", "900"))
-MARKET_SLUG_PREFIX = os.getenv("MARKET_SLUG_PREFIX", "btc-updown-15m").lower()
-PAPER_TRADES_PATH = os.getenv("PAPER_TRADES_PATH", "paper_trades.json")
-PAPER_SETTLEMENT_DELAY_SECONDS = int(os.getenv("PAPER_SETTLEMENT_DELAY_SECONDS", "20"))
-PAPER_SETTLEMENT_CHECK_SECONDS = int(os.getenv("PAPER_SETTLEMENT_CHECK_SECONDS", "10"))
-GAMMA_API_BASE_URL = os.getenv("GAMMA_API_BASE_URL", "https://gamma-api.polymarket.com")
-SPOT_SYMBOL = os.getenv("BINANCE_SPOT_SYMBOL", "BTCUSDT").upper()
+MARKET_INTERVAL_SECONDS = int(os.getenv("MARKET_5M_INTERVAL_SECONDS", "300"))
+MARKET_SLUG_PREFIX = os.getenv("MARKET_ETH_5M_SLUG_PREFIX", "eth-updown-5m").lower()
+MARKET_LABEL = "5-MIN"
+TRADE_JOURNAL_PATH = os.getenv("TRADE_JOURNAL_ETH_5M_PATH", "trade_journal_eth_5min.jsonl")
+PAPER_TRADES_PATH = os.getenv("PAPER_TRADES_ETH_5M_PATH", "paper_trades_eth_5min.json")
+SPOT_PRODUCT_ID = os.getenv("ETH_SPOT_PRODUCT_ID", "ETH-USD")
+DERIBIT_CURRENCY = os.getenv("ETH_DERIBIT_CURRENCY", "ETH").upper()
+REDIS_SIMULATION_KEY = os.getenv("ETH_REDIS_SIMULATION_KEY", "eth_trading:simulation_mode")
 
 # Local strategy/test configuration. Keep these in code so threshold changes are
 # explicit and not dependent on shell or system environment variables.
@@ -114,6 +116,9 @@ MARKET_CLOSE_BUFFER_SECONDS = 1
 MAX_TRADES_PER_MARKET = 3
 REQUIRE_FUSION_CONFIRMATION = False
 MAX_TOTAL_EXPOSURE = BANKROLL
+PAPER_SETTLEMENT_DELAY_SECONDS = int(os.getenv("PAPER_SETTLEMENT_DELAY_SECONDS", "20"))
+PAPER_SETTLEMENT_CHECK_SECONDS = int(os.getenv("PAPER_SETTLEMENT_CHECK_SECONDS", "10"))
+GAMMA_API_BASE_URL = os.getenv("GAMMA_API_BASE_URL", "https://gamma-api.polymarket.com")
 
 # Lowered Markov sample requirements for dry-run system testing.
 MARKOV_MIN_TRANSITIONS = 45
@@ -219,9 +224,9 @@ def init_redis():
         return None
 
 
-class IntegratedBTCStrategy(Strategy):
+class IntegratedETHStrategy(Strategy):
     """
-    Integrated BTC Strategy - FIXED VERSION
+    Integrated ETH Strategy - FIXED VERSION
     - Subscribes immediately at startup
     - Forces stability for first trade
     - Correct timing for market switching
@@ -238,8 +243,8 @@ class IntegratedBTCStrategy(Strategy):
         self.redis_client = redis_client
         self.current_simulation_mode = False
 
-        # Store ALL BTC instruments
-        self.all_btc_instruments: List[Dict] = []
+        # Store ALL ETH instruments
+        self.all_eth_instruments: List[Dict] = []
         self.current_instrument_index: int = -1
         self.next_switch_time: Optional[datetime] = None
 
@@ -248,7 +253,7 @@ class IntegratedBTCStrategy(Strategy):
         self._market_stable = False
         self._last_instrument_switch = None
         
-        # Markov/Kelly configuration is intentionally local to bot.py for
+        # Markov/Kelly configuration is intentionally local to bot-eth-5min.py for
         # repeatable dry-run testing.
         self.dry_run = DRY_RUN
         self.min_edge = MIN_EDGE
@@ -263,7 +268,7 @@ class IntegratedBTCStrategy(Strategy):
         self.market_close_buffer_seconds = MARKET_CLOSE_BUFFER_SECONDS
         self.max_trades_per_market = MAX_TRADES_PER_MARKET
         self.require_fusion_confirmation = REQUIRE_FUSION_CONFIRMATION
-        self.trade_journal = get_trade_journal(os.getenv("TRADE_JOURNAL_PATH", "trade_journal.jsonl"))
+        self.trade_journal = get_trade_journal(TRADE_JOURNAL_PATH)
 
         self.last_trade_time = -1
         self._last_edge_check_at: Optional[datetime] = None
@@ -280,7 +285,7 @@ class IntegratedBTCStrategy(Strategy):
         self._spot_candles_cache: List[Dict] = []
         self._spot_candles_cache_time: Optional[datetime] = None
 
-        # YES token id for the current market (set in _load_all_btc_instruments)
+        # YES token id for the current market (set in _load_all_eth_instruments)
         self._yes_token_id: Optional[str] = None
 
         # Phase 4: Signal Processors
@@ -304,6 +309,7 @@ class IntegratedBTCStrategy(Strategy):
             velocity_threshold_30s=0.010,  # 1.0% move in 30s
         )
         self.deribit_pcr_processor = DeribitPCRProcessor(
+            currency=DERIBIT_CURRENCY,
             bullish_pcr_threshold=1.20,
             bearish_pcr_threshold=0.70,
             max_days_to_expiry=2,
@@ -368,7 +374,7 @@ class IntegratedBTCStrategy(Strategy):
             logger.info("=" * 80)
 
         logger.info("=" * 80)
-        logger.info("INTEGRATED BTC STRATEGY INITIALIZED - FIXED VERSION")
+        logger.info("INTEGRATED ETH STRATEGY INITIALIZED - FIXED VERSION")
         logger.info("  Phase 4: Signal processors ready")
         logger.info("  Phase 5: Risk engine ready")
         logger.info("  Phase 6: Performance tracking ready")
@@ -422,7 +428,7 @@ class IntegratedBTCStrategy(Strategy):
         if not self.redis_client:
             return self.current_simulation_mode
         try:
-            sim_mode = self.redis_client.get('btc_trading:simulation_mode')
+            sim_mode = self.redis_client.get(REDIS_SIMULATION_KEY)
             if sim_mode is not None:
                 redis_simulation = sim_mode == '1'
                 if redis_simulation != self.current_simulation_mode:
@@ -443,13 +449,13 @@ class IntegratedBTCStrategy(Strategy):
     def on_start(self):
         """Called when strategy starts - LOAD ALL MARKETS AND SUBSCRIBE IMMEDIATELY"""
         logger.info("=" * 80)
-        logger.info("INTEGRATED BTC STRATEGY STARTED - FIXED VERSION")
+        logger.info("INTEGRATED ETH STRATEGY STARTED - FIXED VERSION")
         logger.info("=" * 80)
 
         # =========================================================================
-        # FIX 2: Load ALL BTC instruments at startup
+        # FIX 2: Load ALL ETH instruments at startup
         # =========================================================================
-        self._load_all_btc_instruments()
+        self._load_all_eth_instruments()
 
         # =========================================================================
         # FIX 3: Force subscribe to current market IMMEDIATELY
@@ -482,7 +488,7 @@ class IntegratedBTCStrategy(Strategy):
             threading.Thread(target=self._start_grafana_sync, daemon=True).start()
 
         logger.info("=" * 80)
-        logger.info("Strategy active - will trade every 15 minutes")
+        logger.info(f"Strategy active - will trade every {MARKET_INTERVAL_SECONDS // 60} minutes")
         logger.info(f"Price history: {len(self.price_history)} points")
         if len(self.price_history) >= 20:
             logger.info("✓ READY TO TRADE NOW!")
@@ -507,18 +513,18 @@ class IntegratedBTCStrategy(Strategy):
             base_price = new_price
 
     # ------------------------------------------------------------------
-    # Load all BTC instruments at once
+    # Load all ETH instruments at once
     # ------------------------------------------------------------------
 
-    def _load_all_btc_instruments(self):
-        """Load ALL BTC instruments from cache and sort by start time"""
+    def _load_all_eth_instruments(self):
+        """Load ALL ETH instruments from cache and sort by start time"""
         instruments = self.cache.instruments()
-        logger.info(f"Loading ALL BTC instruments from {len(instruments)} total...")
+        logger.info(f"Loading ALL ETH instruments from {len(instruments)} total...")
         
         now = datetime.now(timezone.utc)
         current_timestamp = int(now.timestamp())
         
-        btc_instruments = []
+        eth_instruments = []
         
         for instrument in instruments:
             try:
@@ -526,7 +532,7 @@ class IntegratedBTCStrategy(Strategy):
                     question = instrument.info.get('question', '').lower()
                     slug = instrument.info.get('market_slug', '').lower()
                     
-                    if ('btc' in question or 'btc' in slug) and MARKET_SLUG_PREFIX in slug:
+                    if ('eth' in question or 'eth' in slug) and MARKET_SLUG_PREFIX in slug:
                         try:
                             timestamp_part = slug.split('-')[-1]
                             market_timestamp = int(timestamp_part)
@@ -552,7 +558,7 @@ class IntegratedBTCStrategy(Strategy):
                                 # Then take the token_id after the condition_id dash
                                 yes_token_id = without_suffix.split('-')[-1] if '-' in without_suffix else without_suffix
 
-                                btc_instruments.append({
+                                eth_instruments.append({
                                     'instrument': instrument,
                                     'slug': slug,
                                     'start_time': datetime.fromtimestamp(real_start_ts, tz=timezone.utc),
@@ -573,7 +579,7 @@ class IntegratedBTCStrategy(Strategy):
         # The second instrument found for the same slug is the NO/DOWN token.
         seen_slugs = {}
         deduped = []
-        for inst in btc_instruments:
+        for inst in eth_instruments:
             slug = inst['slug']
             if slug not in seen_slugs:
                 # First token seen = YES (UP)
@@ -584,25 +590,25 @@ class IntegratedBTCStrategy(Strategy):
             else:
                 # Second token seen = NO (DOWN); store it on the existing entry.
                 seen_slugs[slug]['no_instrument_id'] = inst['instrument'].id
-        btc_instruments = deduped
+        eth_instruments = deduped
         
         # Sort by start time (absolute timestamp, not time-of-day)
-        btc_instruments.sort(key=lambda x: x['market_timestamp'])
+        eth_instruments.sort(key=lambda x: x['market_timestamp'])
         
         logger.info("=" * 80)
-        logger.info(f"FOUND {len(btc_instruments)} BTC 15-MIN MARKETS:")
-        for i, inst in enumerate(btc_instruments):
+        logger.info(f"FOUND {len(eth_instruments)} ETH {MARKET_LABEL} MARKETS:")
+        for i, inst in enumerate(eth_instruments):
             # A market is ACTIVE if it has started AND not yet ended
             is_active = inst['time_diff_minutes'] <= 0 and inst['end_timestamp'] > current_timestamp
             status = "ACTIVE" if is_active else "FUTURE" if inst['time_diff_minutes'] > 0 else "PAST"
             logger.info(f"  [{i}] {inst['slug']}: {status} (starts at {inst['start_time'].strftime('%H:%M:%S')}, ends at {inst['end_time'].strftime('%H:%M:%S')})")
         logger.info("=" * 80)
         
-        self.all_btc_instruments = btc_instruments
+        self.all_eth_instruments = eth_instruments
         
         # Find current market and SUBSCRIBE IMMEDIATELY
-        # FIXED: A market is current if it has STARTED and not yet ENDED (use end_time, not a hardcoded 15-min window)
-        for i, inst in enumerate(btc_instruments):
+        # FIXED: A market is current if it has STARTED and not yet ENDED (use end_time, not a hardcoded interval window)
+        for i, inst in enumerate(eth_instruments):
             is_active = inst['time_diff_minutes'] <= 0 and inst['end_timestamp'] > current_timestamp
             if is_active:
                 self.current_instrument_index = i
@@ -622,17 +628,17 @@ class IntegratedBTCStrategy(Strategy):
                 logger.info(f"  ✓ SUBSCRIBED to current market")
                 break
         
-        if self.current_instrument_index == -1 and btc_instruments:
+        if self.current_instrument_index == -1 and eth_instruments:
                 # No currently-active market; find the NEAREST upcoming one.
             # (smallest positive time_diff_minutes = starts soonest)
-            future_markets = [inst for inst in btc_instruments if inst['time_diff_minutes'] > 0]
+            future_markets = [inst for inst in eth_instruments if inst['time_diff_minutes'] > 0]
             if future_markets:
                 nearest = min(future_markets, key=lambda x: x['time_diff_minutes'])
-                nearest_idx = btc_instruments.index(nearest)
+                nearest_idx = eth_instruments.index(nearest)
             else:
                 # All markets are in the past; use the last one.
-                nearest = btc_instruments[-1]
-                nearest_idx = len(btc_instruments) - 1
+                nearest = eth_instruments[-1]
+                nearest_idx = len(eth_instruments) - 1
 
             self.current_instrument_index = nearest_idx
             inst = nearest
@@ -652,16 +658,16 @@ class IntegratedBTCStrategy(Strategy):
             
     def _switch_to_next_market(self):
         """Switch to the next market in the pre-loaded list"""
-        if not self.all_btc_instruments:
+        if not self.all_eth_instruments:
             logger.error("No instruments loaded!")
             return False
         
         next_index = self.current_instrument_index + 1
-        if next_index >= len(self.all_btc_instruments):
+        if next_index >= len(self.all_eth_instruments):
             logger.warning("No more markets available - will restart bot")
             return False
         
-        next_market = self.all_btc_instruments[next_index]
+        next_market = self.all_eth_instruments[next_index]
         now = datetime.now(timezone.utc)
         
         # Check if next market is ready
@@ -746,8 +752,8 @@ class IntegratedBTCStrategy(Strategy):
                     logger.info("=" * 80)
                     # Update next_switch_time to the market's END time
                     if (self.current_instrument_index >= 0 and
-                            self.current_instrument_index < len(self.all_btc_instruments)):
-                        current_market = self.all_btc_instruments[self.current_instrument_index]
+                            self.current_instrument_index < len(self.all_eth_instruments)):
+                        current_market = self.all_eth_instruments[self.current_instrument_index]
                         self.next_switch_time = current_market['end_time']
                         logger.info(f"  Market ends at {self.next_switch_time.strftime('%H:%M:%S')} UTC")
                     self._waiting_for_market_open = False
@@ -816,10 +822,10 @@ class IntegratedBTCStrategy(Strategy):
                 return
 
             if (self.current_instrument_index < 0 or
-                    self.current_instrument_index >= len(self.all_btc_instruments)):
+                    self.current_instrument_index >= len(self.all_eth_instruments)):
                 return
 
-            current_market = self.all_btc_instruments[self.current_instrument_index]
+            current_market = self.all_eth_instruments[self.current_instrument_index]
             market_start_ts = current_market['market_timestamp']  # Slug timestamp = market start (Unix)
 
             elapsed_secs = now.timestamp() - market_start_ts
@@ -881,8 +887,8 @@ class IntegratedBTCStrategy(Strategy):
 
         Returns a dict with:
           - sentiment_score (float 0-100): live Fear & Greed index, or None
-          - spot_price (float): live BTCUSDT from Binance Global, or None
-          - spot_candles (list): recent BTC candles for Markov state transitions
+          - spot_price (float): live ETH-USD from Coinbase, or None
+          - spot_candles (list): recent ETH candles for Markov state transitions
           - deviation (float): polymarket price vs SMA-20 (always computed)
           - momentum (float): 5-period rate of change (always computed)
           - volatility (float): price std-dev over last 20 ticks (always computed)
@@ -931,22 +937,20 @@ class IntegratedBTCStrategy(Strategy):
         except Exception as e:
             logger.warning(f"Could not fetch Fear & Greed index: {e} - sentiment processor skipped")
 
-        # --- Real spot price and candles: Binance Global BTCUSDT REST API ---
+        # --- Real spot price and candles: Coinbase ETH-USD REST API ---
         try:
-            from data_sources.binance.adapter import BinanceDataSource
-            binance = BinanceDataSource(symbol=SPOT_SYMBOL)
+            from data_sources.coinbase.adapter import CoinbaseDataSource
+            coinbase = CoinbaseDataSource(product_id=SPOT_PRODUCT_ID)
             try:
-                connected = await binance.connect()
-                spot = await binance.get_current_price() if connected else None
+                connected = await coinbase.connect()
+                spot = await coinbase.get_current_price() if connected else None
                 if spot:
                     metadata["spot_price"] = float(spot)
-                    metadata["spot_source"] = "binance"
-                    metadata["spot_symbol"] = SPOT_SYMBOL
                     self._spot_price_history.append({"ts": datetime.now(timezone.utc), "price": spot})
                     metadata["spot_price_history"] = list(self._spot_price_history)
-                    logger.info(f"Binance Global {SPOT_SYMBOL} spot price: ${float(spot):,.2f}")
+                    logger.info(f"Coinbase {SPOT_PRODUCT_ID} spot price: ${float(spot):,.2f}")
                 else:
-                    logger.warning("Binance price fetch returned None - divergence processor skipped")
+                    logger.warning("Coinbase price fetch returned None - divergence processor skipped")
 
                 cache_seconds = int(os.getenv("MARKOV_CANDLES_CACHE_SECONDS", "60"))
                 cache_stale = (
@@ -955,27 +959,26 @@ class IntegratedBTCStrategy(Strategy):
                 )
                 if connected and cache_stale:
                     granularity = int(os.getenv("MARKOV_CANDLE_GRANULARITY", "60"))
-                    candles = await binance.get_candles(granularity=granularity, limit=120)
+                    candles = await coinbase.get_candles(granularity=granularity, limit=120)
                     if candles:
                         self._spot_candles_cache = candles
                         self._spot_candles_cache_time = datetime.now(timezone.utc)
-                        logger.info(f"Loaded {len(candles)} Binance candles for Markov model")
+                        logger.info(f"Loaded {len(candles)} Coinbase candles for Markov model")
                     else:
-                        logger.warning("Binance candle fetch returned no data - Markov will use fallback history")
+                        logger.warning("Coinbase candle fetch returned no data - Markov will use fallback history")
             finally:
-                await binance.disconnect()
+                await coinbase.disconnect()
 
             if self._spot_candles_cache:
                 metadata["spot_candles"] = self._spot_candles_cache
         except Exception as e:
-            logger.warning(f"Could not fetch Binance market context: {e} - Markov may use fallback history")
+            logger.warning(f"Could not fetch Coinbase market context: {e} - Markov may use fallback history")
 
         logger.info(
             f"Market context - deviation={deviation:.2%}, "
             f"momentum={momentum:.2%}, volatility={volatility:.4f}, "
             f"sentiment={'%.0f' % metadata['sentiment_score'] if 'sentiment_score' in metadata else 'N/A'}, "
-            f"spot=${'%.2f' % metadata['spot_price'] if 'spot_price' in metadata else 'N/A'}, "
-            f"spot_source={metadata.get('spot_source', 'N/A')}"
+            f"spot=${'%.2f' % metadata['spot_price'] if 'spot_price' in metadata else 'N/A'}"
         )
         return metadata
 
@@ -1107,8 +1110,8 @@ class IntegratedBTCStrategy(Strategy):
         else:
             executed = await self._place_real_order(markov_signal, position_size, current_price, direction)
 
-        if executed and 0 <= self.current_instrument_index < len(self.all_btc_instruments):
-            market_ts = self.all_btc_instruments[self.current_instrument_index]['market_timestamp']
+        if executed and 0 <= self.current_instrument_index < len(self.all_eth_instruments):
+            market_ts = self.all_eth_instruments[self.current_instrument_index]['market_timestamp']
             self._market_trade_counts[market_ts] = self._market_trade_counts.get(market_ts, 0) + 1
             logger.info(
                 f"Market trade count: {self._market_trade_counts[market_ts]}/"
@@ -1186,8 +1189,8 @@ class IntegratedBTCStrategy(Strategy):
         return True
 
     def _current_market_snapshot(self) -> Dict[str, Any]:
-        if 0 <= self.current_instrument_index < len(self.all_btc_instruments):
-            market = self.all_btc_instruments[self.current_instrument_index]
+        if 0 <= self.current_instrument_index < len(self.all_eth_instruments):
+            market = self.all_eth_instruments[self.current_instrument_index]
             return {
                 "slug": market.get("slug"),
                 "start_time": market.get("start_time"),
@@ -1360,7 +1363,7 @@ class IntegratedBTCStrategy(Strategy):
 
             qty = Quantity(token_qty, precision=precision)
             timestamp_ms = int(time.time() * 1000)
-            unique_id = f"BTC-MARKOV-${max_usd_amount:.0f}-{timestamp_ms}"
+            unique_id = f"ETH-MARKOV-${max_usd_amount:.0f}-{timestamp_ms}"
 
             order = self.order_factory.market(
                 instrument_id=trade_instrument_id,
@@ -1562,7 +1565,7 @@ class IntegratedBTCStrategy(Strategy):
             logger.error(f"Failed to start Grafana: {e}")
 
     def on_stop(self):
-        logger.info("Integrated BTC strategy stopped")
+        logger.info("Integrated ETH strategy stopped")
         logger.info(f"Total paper trades recorded: {len(self.paper_trades)}")
         if self.grafana_exporter:
             import asyncio
@@ -1577,7 +1580,7 @@ class IntegratedBTCStrategy(Strategy):
 # ---------------------------------------------------------------------------
 
 def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, test_mode: bool = False):
-    """Run the integrated BTC Up/Down trading bot."""
+    """Run the integrated ETH Up/Down trading bot."""
     dry_run = DRY_RUN
     if dry_run:
         simulation = True
@@ -1597,7 +1600,7 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
         os.environ.setdefault("POLYMARKET_RELAYER_API_KEY", relayer_api_key)
     
     print("=" * 80)
-    print("INTEGRATED POLYMARKET BTC 15-MIN TRADING BOT")
+    print(f"INTEGRATED POLYMARKET ETH {MARKET_LABEL} TRADING BOT")
     print("Nautilus + Markov Edge + Kelly Sizing")
     print("=" * 80)
 
@@ -1609,7 +1612,7 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
             # This prevents a stale value from a previous --live run
             # silently overriding --test-mode or --simulation runs.
             mode_value = '1' if simulation else '0'
-            redis_client.set('btc_trading:simulation_mode', mode_value)
+            redis_client.set(REDIS_SIMULATION_KEY, mode_value)
             mode_label = 'SIMULATION' if simulation else 'LIVE'
             logger.info(f"Redis simulation_mode forced to: {mode_label} ({mode_value})")
         except Exception as e:
@@ -1620,7 +1623,11 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
     print(f"  DRY_RUN: {dry_run}")
     print(f"  Redis Control: {'Enabled' if redis_client else 'Disabled'}")
     print(f"  Grafana: {'Enabled' if enable_grafana else 'Disabled'}")
-    print(f"  Spot data source: Binance Global ({SPOT_SYMBOL})")
+    print(f"  Market interval: {MARKET_INTERVAL_SECONDS}s")
+    print(f"  Market slug prefix: {MARKET_SLUG_PREFIX}")
+    print(f"  Spot product: {SPOT_PRODUCT_ID}")
+    print(f"  Paper trades path: {PAPER_TRADES_PATH}")
+    print(f"  Trade journal path: {TRADE_JOURNAL_PATH}")
     print(f"  Markov: MIN_PROB={MIN_PROB:.2f} MIN_EDGE={MIN_EDGE:.2f}")
     print(f"  Bankroll: ${BANKROLL:.2f}")
     print(f"  Bet range: ${MIN_BET:.2f} - ${MAX_BET:.2f}")
@@ -1639,23 +1646,23 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
     now = datetime.now(timezone.utc)
     unix_interval_start = (int(now.timestamp()) // MARKET_INTERVAL_SECONDS) * MARKET_INTERVAL_SECONDS
 
-    btc_slugs = []
+    eth_slugs = []
     for i in range(-1, 97):  # include 1 prior interval (in case we're just after boundary)
         timestamp = unix_interval_start + (i * MARKET_INTERVAL_SECONDS)
-        btc_slugs.append(f"{MARKET_SLUG_PREFIX}-{timestamp}")
+        eth_slugs.append(f"{MARKET_SLUG_PREFIX}-{timestamp}")
 
     filters = {
         "active": True,
         "closed": False,
         "archived": False,
-        "slug": tuple(btc_slugs),
+        "slug": tuple(eth_slugs),
         "limit": 100,
     }
 
     logger.info("=" * 80)
-    logger.info("LOADING BTC 15-MIN MARKETS BY SLUG")
-    logger.info(f"  Interval start: {unix_interval_start} | Count: {len(btc_slugs)}")
-    logger.info(f"  First: {btc_slugs[0]}  Last: {btc_slugs[-1]}")
+    logger.info(f"LOADING ETH {MARKET_LABEL} MARKETS BY SLUG")
+    logger.info(f"  Interval start: {unix_interval_start} | Count: {len(eth_slugs)}")
+    logger.info(f"  First: {eth_slugs[0]}  Last: {eth_slugs[-1]}")
     logger.info("=" * 80)
 
     instrument_cfg = InstrumentProviderConfig(
@@ -1699,7 +1706,7 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
 
     config = TradingNodeConfig(
         environment="live",
-        trader_id="BTC-MARKOV-INTEGRATED-001",
+        trader_id="ETH-MARKOV-INTEGRATED-001",
         logging=LoggingConfig(
             log_level="INFO",
             log_directory="./logs/nautilus",
@@ -1711,7 +1718,7 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
         exec_clients=exec_clients,
     )
 
-    strategy = IntegratedBTCStrategy(
+    strategy = IntegratedETHStrategy(
         redis_client=redis_client,
         enable_grafana=enable_grafana,
         test_mode=test_mode,
@@ -1742,7 +1749,7 @@ def run_integrated_bot(simulation: bool = False, enable_grafana: bool = True, te
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Integrated BTC Up/Down Markov Trading Bot")
+    parser = argparse.ArgumentParser(description="Integrated ETH Up/Down Markov Trading Bot")
     parser.add_argument("--live", action="store_true",
                         help="Run in LIVE mode (real money at risk!). Default is simulation.")
     parser.add_argument("--no-grafana", action="store_true", help="Disable Grafana metrics")
@@ -1761,7 +1768,7 @@ def main():
 
     if DRY_RUN:
         if args.live:
-            logger.warning("DRY_RUN=True in bot.py; --live will still run in simulation mode.")
+            logger.warning("DRY_RUN=True in bot-eth-5min.py; --live will still run in simulation mode.")
         simulation = True
 
     if not simulation:

@@ -459,16 +459,16 @@ class PolymarketBTCIntegration:
     def get_balance(self) -> Dict[str, Any]:
         """Get account balance."""
         if not self.node:
-            return {"USDC": 0.0}
+            return {"collateral": 0.0}
         
         # Get account state from Nautilus cache
         account = self.node.cache.account(self.node.trader.id.get_tag())
         
         if not account:
-            return {"USDC": 0.0}
+            return {"collateral": 0.0}
         
         return {
-            "USDC": float(account.balance_total().as_decimal()),
+            "collateral": float(account.balance_total().as_decimal()),
             "free": float(account.balance_free().as_decimal()),
             "locked": float(account.balance_locked().as_decimal()),
         }

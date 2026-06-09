@@ -47,7 +47,7 @@ class PolymarketClient:
             testnet: Use testnet mode
         """
         # Load from environment if not provided
-        self.private_key = private_key or os.getenv("POLYMARKET_PK")
+        self.private_key = private_key or os.getenv("POLYMARKET_PK") or os.getenv("PRIVATE_KEY")
         self.api_key = api_key or os.getenv("POLYMARKET_API_KEY")
         self.api_secret = api_secret or os.getenv("POLYMARKET_API_SECRET")
         self.api_passphrase = api_passphrase or os.getenv("POLYMARKET_PASSPHRASE")
@@ -93,12 +93,23 @@ class PolymarketClient:
         
         try:
             # Initialize CLOB client
+            host = os.getenv("CLOB_HOST") or (
+                "https://clob.polymarket.com"
+                if not self.testnet
+                else "https://clob-testnet.polymarket.com"
+            )
+            funder = (
+                os.getenv("POLYMARKET_ADDRESS")
+                or os.getenv("SAFE_ADDRESS")
+                or os.getenv("POLYMARKET_FUNDER")
+            )
+
             self.client = ClobClient(
-                host="https://clob.polymarket.com" if not self.testnet else "https://clob-testnet.polymarket.com",
+                host=host,
                 key=self.private_key,
                 chain_id=self.chain_id,
-                signature_type=1,  # EOA signature
-                funder=os.getenv("POLYMARKET_FUNDER"),  # Optional funder address
+                signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
+                funder=funder,
             )
             
             # Set API credentials for authenticated endpoints
@@ -114,7 +125,8 @@ class PolymarketClient:
             if balance is not None:
                 self._connected = True
                 logger.info(f"✓ Connected to Polymarket CLOB")
-                logger.info(f"  Balance: ${balance.get('USDC', 0):.2f} USDC")
+                collateral = balance.get("USDC", balance.get("collateral", 0))
+                logger.info(f"  Collateral balance: ${collateral:.2f}")
                 return True
             else:
                 logger.error("Failed to verify connection")
@@ -383,7 +395,7 @@ class PolymarketClient:
             
             positions = []
             for token_id, balance in balances.items():
-                if token_id != "USDC" and float(balance) > 0:
+                if token_id not in {"USDC", "collateral"} and float(balance) > 0:
                     positions.append({
                         "token_id": token_id,
                         "size": Decimal(str(balance)),
@@ -418,7 +430,7 @@ class PolymarketClient:
         Get account balance.
         
         Returns:
-            Balance dict with USDC and token balances
+            Balance dict with collateral and token balances.
         """
         return await self._get_balance_internal() or {}
     

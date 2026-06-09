@@ -15,7 +15,7 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 
-from data_sources.coinbase.adapter import CoinbaseDataSource
+from data_sources.binance.adapter import BinanceDataSource
 from data_sources.binance.websocket import BinanceWebSocketSource
 from data_sources.news_social.adapter import NewsSocialDataSource
 from data_sources.solana.rpc import SolanaRPCDataSource
@@ -25,8 +25,8 @@ from data_sources.solana.rpc import SolanaRPCDataSource
 class MarketData:
     """Normalized market data structure."""
     timestamp: datetime
-    source: str  # "coinbase", "binance", etc.
-    symbol: str  # "BTC-USD", "BTCUSDT", etc.
+    source: str  # "binance", "binance_ws", etc.
+    symbol: str  # "BTCUSDT", etc.
     price: Decimal
     bid: Optional[Decimal] = None
     ask: Optional[Decimal] = None
@@ -59,7 +59,7 @@ class UnifiedDataAdapter:
     def __init__(self):
         """Initialize unified adapter."""
         # Data sources
-        self.coinbase: Optional[CoinbaseDataSource] = None
+        self.binance_rest: Optional[BinanceDataSource] = None
         self.binance: Optional[BinanceWebSocketSource] = None
         self.news_social: Optional[NewsSocialDataSource] = None
         self.solana: Optional[SolanaRPCDataSource] = None
@@ -89,21 +89,27 @@ class UnifiedDataAdapter:
         
         results = {}
         
-        # Connect Coinbase
+        # Connect Binance Global REST (not Binance US)
         try:
-            self.coinbase = CoinbaseDataSource()
-            results["coinbase"] = await self.coinbase.connect()
+            self.binance_rest = BinanceDataSource()
+            results["binance"] = await self.binance_rest.connect()
+            if not results["binance"]:
+                self.binance_rest = None
         except Exception as e:
-            logger.error(f"Failed to connect Coinbase: {e}")
-            results["coinbase"] = False
+            logger.error(f"Failed to connect Binance Global REST: {e}")
+            self.binance_rest = None
+            results["binance"] = False
         
         # Connect Binance
         try:
             self.binance = BinanceWebSocketSource()
-            results["binance"] = await self.binance.connect("ticker")
+            results["binance_ws"] = await self.binance.connect("ticker")
+            if not results["binance_ws"]:
+                self.binance = None
         except Exception as e:
-            logger.error(f"Failed to connect Binance: {e}")
-            results["binance"] = False
+            logger.error(f"Failed to connect Binance WebSocket: {e}")
+            self.binance = None
+            results["binance_ws"] = False
         
         # Connect News/Social
         try:
@@ -145,8 +151,8 @@ class UnifiedDataAdapter:
         self._update_tasks.clear()
         
         # Disconnect sources
-        if self.coinbase:
-            await self.coinbase.disconnect()
+        if self.binance_rest:
+            await self.binance_rest.disconnect()
         
         if self.binance:
             await self.binance.disconnect()
@@ -164,9 +170,9 @@ class UnifiedDataAdapter:
         self._is_running = True
         logger.info("Starting data streams...")
         
-        # Start Coinbase polling (REST API)
-        if self.coinbase:
-            task = asyncio.create_task(self._poll_coinbase())
+        # Start Binance Global polling (REST API)
+        if self.binance_rest:
+            task = asyncio.create_task(self._poll_binance_rest())
             self._update_tasks.append(task)
         
         # Start Binance WebSocket streaming
@@ -181,9 +187,9 @@ class UnifiedDataAdapter:
         
         logger.info(f"Started {len(self._update_tasks)} data streams")
     
-    async def _poll_coinbase(self, interval: int = 5) -> None:
+    async def _poll_binance_rest(self, interval: int = 5) -> None:
         """
-        Poll Coinbase API for price updates.
+        Poll Binance Global REST API for price updates.
         
         Args:
             interval: Seconds between polls
@@ -191,20 +197,20 @@ class UnifiedDataAdapter:
         while self._is_running:
             try:
                 # Get current price
-                price = await self.coinbase.get_current_price()
+                price = await self.binance_rest.get_current_price()
                 
                 if price:
                     # Get order book for bid/ask
-                    book = await self.coinbase.get_order_book(level=1)
+                    book = await self.binance_rest.get_order_book(level=1)
                     
                     # Get 24h stats
-                    stats = await self.coinbase.get_24h_stats()
+                    stats = await self.binance_rest.get_24h_stats()
                     
                     # Create normalized data
                     market_data = MarketData(
                         timestamp=datetime.now(),
-                        source="coinbase",
-                        symbol="BTC-USD",
+                        source="binance",
+                        symbol=self.binance_rest.symbol,
                         price=price,
                         bid=book["bids"][0]["price"] if book and book["bids"] else None,
                         ask=book["asks"][0]["price"] if book and book["asks"] else None,
@@ -214,7 +220,7 @@ class UnifiedDataAdapter:
                     )
                     
                     # Cache and notify
-                    self._latest_data["coinbase"] = market_data
+                    self._latest_data["binance"] = market_data
                     
                     if self.on_price_update:
                         await self.on_price_update(market_data)
@@ -224,7 +230,7 @@ class UnifiedDataAdapter:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error polling Coinbase: {e}")
+                logger.error(f"Error polling Binance Global REST: {e}")
                 await asyncio.sleep(interval)
     
     async def _stream_binance(self) -> None:
@@ -234,7 +240,7 @@ class UnifiedDataAdapter:
             try:
                 market_data = MarketData(
                     timestamp=ticker_data["timestamp"],
-                    source="binance",
+                    source="binance_ws",
                     symbol="BTCUSDT",
                     price=ticker_data["price"],
                     volume_24h=ticker_data["volume"],
@@ -247,7 +253,7 @@ class UnifiedDataAdapter:
                 )
                 
                 # Cache and notify
-                self._latest_data["binance"] = market_data
+                self._latest_data["binance_ws"] = market_data
                 
                 if self.on_price_update:
                     await self.on_price_update(market_data)
@@ -306,7 +312,7 @@ class UnifiedDataAdapter:
         Get latest price from a specific source or average of all.
         
         Args:
-            source: Specific source ("coinbase", "binance") or None for average
+            source: Specific source ("binance", "binance_ws") or None for average
             
         Returns:
             Latest price
@@ -360,11 +366,11 @@ class UnifiedDataAdapter:
         """
         health = {}
         
-        if self.coinbase:
-            health["coinbase"] = await self.coinbase.health_check()
+        if self.binance_rest:
+            health["binance"] = await self.binance_rest.health_check()
         
         if self.binance:
-            health["binance"] = await self.binance.health_check()
+            health["binance_ws"] = await self.binance.health_check()
         
         if self.news_social:
             health["news_social"] = await self.news_social.health_check()
